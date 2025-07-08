@@ -39,7 +39,7 @@ def login(driver):
     driver.find_element(By.NAME, "f_username").send_keys(USERNAME)
     driver.find_element(By.NAME, "pwd").send_keys(PASSWORD)
     driver.find_element(By.XPATH, '//input[@value="Войти"]').click()
-    Wait(driver, PAGE_TIMEOUT).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    Wait(driver, PAGE_TIMEOUT).until(EC.presence_of_element_located((By.TAG_NAME, "title")))
 
 def scrape_status(driver):
     driver.get(ROUTER_URL_INFO)
