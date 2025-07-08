@@ -14,7 +14,7 @@ ROUTER_URL_INFO  = "http://192.168.2.1/status/st_deviceinfo_tl.htm"
 ROUTER_URL_LOG   = "http://192.168.2.1/status/st_log_tl.htm"
 USERNAME = "admin"
 PASSWORD = "admin"
-CHECK_PERIOD = 5
+CHECK_PERIOD = 60
 PING_TARGET = "77.88.8.8"
 PING_ROUTER = "192.168.2.1"
 PAGE_TIMEOUT = 180  # wait up to 3 minutes for pages/elements
@@ -199,10 +199,10 @@ try:
         record = {
             "timestamp": now.isoformat(timespec="seconds"),
             "status": status,
-            "ping_ok": ok_ping,
-            "ping_rtt": rtt_ping,
-            "router_ping": ok_router,
-            "router_rtt": rtt_router,
+            "ping_yandex": ok_ping,
+            "ping_uandex_ms": rtt_ping,
+            "ping_router": ok_router,
+            "ping_router_ms": rtt_router,
         }
 
         # Проверяем обрыв по uptime
@@ -223,11 +223,11 @@ try:
             # Можно (по желанию) также сохранить предыдущий статус в JSON, если хочешь "до"
             if len(history) > 0:
                 with open(evdir / "status_before.json", "w", encoding="utf-8") as f:
-                    json.dump(history[-1], f, ensure_ascii=False, indent=2)
+                    json.dump( history[-KEEP_STATES:], f, ensure_ascii=False, indent=2)
 
             evt = {
                 "drop_detected": now.isoformat(timespec="seconds"),
-                "prev_state": history[-1] if history else None,
+                "prev_states": history[-KEEP_STATES:] if history else None,
                 "new_state": record,
                 "screens": {
                     "status_before": str(evdir / "status_before.png"),
@@ -236,7 +236,7 @@ try:
                     "log_after":     str(evdir / "log_after.png"),
                 },
                 "logs": {
-                    "before": log_history[1] if len(log_history) > 1 else None,
+                    "before": log_history[-1] if len(log_history) > 1 else None,
                     "after":  log_data,
                 }
             }
