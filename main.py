@@ -16,6 +16,7 @@ PASSWORD = "admin"
 CHECK_PERIOD = 5
 PING_TARGET = "77.88.8.8"
 PING_ROUTER = "192.168.2.1"
+PAGE_TIMEOUT = 180  # wait up to 3 minutes for pages/elements
 
 OUT_DIR    = Path("router_monitor")
 EVENTS_DIR = OUT_DIR / "events"
@@ -26,21 +27,25 @@ EVENTS_DIR.mkdir(exist_ok=True)
 def mk_driver():
     opts = webdriver.FirefoxOptions() if sys.platform.startswith("linux") else webdriver.ChromeOptions()
     #opts.add_argument("--headless")
-    return (webdriver.Firefox if sys.platform.startswith("linux") else webdriver.Chrome)(options=opts)
-
+    drv = (webdriver.Firefox if sys.platform.startswith("linux") else webdriver.Chrome)(options=opts)
+    drv.set_page_load_timeout(PAGE_TIMEOUT)
+    return drv
 def safe_txt(elem):
     return elem.text.replace('\xa0', ' ').strip()
 
 def login(driver):
     driver.get(ROUTER_URL_LOGIN)
-    Wait(driver, 10).until(EC.presence_of_element_located((By.NAME, "f_username")))
+    Wait(driver, PAGE_TIMEOUT).until(EC.presence_of_element_located((By.NAME, "f_username")))
     driver.find_element(By.NAME, "f_username").send_keys(USERNAME)
     driver.find_element(By.NAME, "pwd").send_keys(PASSWORD)
     driver.find_element(By.XPATH, '//input[@value="Войти"]').click()
-    time.sleep(1)
+    Wait(driver, PAGE_TIMEOUT).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
 
 def scrape_status(driver):
     driver.get(ROUTER_URL_INFO)
+    Wait(driver, PAGE_TIMEOUT).until(
+        EC.presence_of_element_located((By.XPATH, '//td[contains(text(),"Время подключения")]'))
+    )
     def get(x):
         try: return safe_txt(driver.find_element(By.XPATH, x))
         except: return ""
@@ -58,7 +63,9 @@ def scrape_status(driver):
 
 def scrape_full_log(driver, max_rows=None):
     """Return router log entries as list of dicts."""
-    table = driver.find_element(By.ID, "newtablelist")
+    table = Wait(driver, PAGE_TIMEOUT).until(
+        EC.presence_of_element_located((By.ID, "newtablelist"))
+    )
     rows = table.find_elements(By.TAG_NAME, "tr")[1:]
     if max_rows:
         rows = rows[:max_rows]
@@ -141,18 +148,21 @@ try:
             (OUT_DIR / last_status_png).replace(OUT_DIR / prev_status_png)
         if (OUT_DIR / last_log_png).exists():
             (OUT_DIR / last_log_png).replace(OUT_DIR / prev_log_png)
-
+        # Пинг
+        ok_ping, rtt_ping = ping(PING_TARGET)
+        ok_router, _ = ping(PING_ROUTER)
         # Сохраняем свежий статус и скрин status
         status = scrape_status(driver)
         screenshot(driver, last_status_png)
         # Сохраняем скрин логов и сам лог
         driver.get(ROUTER_URL_LOG)
+        Wait(driver, PAGE_TIMEOUT).until(
+            EC.presence_of_element_located((By.ID, "newtablelist"))
+        )
         screenshot(driver, last_log_png)
         log_data = scrape_full_log(driver)
 
-        # Пинг
-        ok_ping, rtt_ping = ping(PING_TARGET)
-        ok_router, _ = ping(PING_ROUTER)
+
 
         record = {
             "timestamp": now.isoformat(timespec="seconds"),
