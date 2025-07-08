@@ -56,19 +56,22 @@ def scrape_status(driver):
         "fw_version": get('//td[contains(text(),"Версия ПО:")]/following-sibling::td')
     }
 
-def scrape_last_dhcp_event(driver, max_rows=20):
-    driver.get(ROUTER_URL_LOG)
+def scrape_full_log(driver, max_rows=None):
+    """Return router log entries as list of dicts."""
     table = driver.find_element(By.ID, "newtablelist")
-    rows  = table.find_elements(By.TAG_NAME, "tr")[1:max_rows+1]
+    rows = table.find_elements(By.TAG_NAME, "tr")[1:]
+    if max_rows:
+        rows = rows[:max_rows]
+    log = []
     for row in rows:
         cols = row.find_elements(By.TAG_NAME, "td")
-        if len(cols) >= 3 and "Client received ip address" in cols[2].text:
-            return {
+        if len(cols) >= 3:
+            log.append({
                 "number": cols[0].text.strip(),
                 "datetime": cols[1].text.strip(),
-                "event": cols[2].text.strip()
-            }
-    return None
+                "event": cols[2].text.strip(),
+            })
+    return log
 
 def ping(host, count=1, timeout=1):
     param = "-n" if sys.platform.startswith("win") else "-c"
@@ -116,6 +119,9 @@ login(driver)
 
 last_status_png = "status_last.png"
 last_log_png    = "log_last.png"
+prev_status_png = "status_prev.png"
+prev_log_png    = "log_prev.png"
+prev_log_data   = None
 
 prev_uptime = None
 history = []
@@ -130,12 +136,19 @@ try:
     while True:
         now = datetime.datetime.now()
 
+        # Переносим предыдущие скриншоты, чтобы иметь "до" состояния
+        if (OUT_DIR / last_status_png).exists():
+            (OUT_DIR / last_status_png).replace(OUT_DIR / prev_status_png)
+        if (OUT_DIR / last_log_png).exists():
+            (OUT_DIR / last_log_png).replace(OUT_DIR / prev_log_png)
+
         # Сохраняем свежий статус и скрин status
         status = scrape_status(driver)
         screenshot(driver, last_status_png)
-        # Сохраняем скрин логов
+        # Сохраняем скрин логов и сам лог
         driver.get(ROUTER_URL_LOG)
         screenshot(driver, last_log_png)
+        log_data = scrape_full_log(driver)
 
         # Пинг
         ok_ping, rtt_ping = ping(PING_TARGET)
@@ -156,7 +169,11 @@ try:
             evdir = EVENTS_DIR / idx
             evdir.mkdir(exist_ok=True)
 
-            # Копируем рабочие скрины в архив события
+            # Копируем скрины до и после
+            if (OUT_DIR / prev_status_png).exists():
+                shutil.copy2(OUT_DIR / prev_status_png, evdir / "status_before.png")
+            if (OUT_DIR / prev_log_png).exists():
+                shutil.copy2(OUT_DIR / prev_log_png,    evdir / "log_before.png")
             shutil.copy2(OUT_DIR / last_status_png, evdir / "status_after.png")
             shutil.copy2(OUT_DIR / last_log_png,    evdir / "log_after.png")
 
@@ -165,17 +182,20 @@ try:
                 with open(evdir / "status_before.json", "w", encoding="utf-8") as f:
                     json.dump(history[-1], f, ensure_ascii=False, indent=2)
 
-            # DHCP event
-            dhcp_evt = scrape_last_dhcp_event(driver)
             evt = {
                 "drop_detected": now.isoformat(timespec="seconds"),
                 "prev_state": history[-1] if history else None,
                 "new_state": record,
                 "screens": {
-                    "status_after": str(evdir / "status_after.png"),
-                    "log_after":    str(evdir / "log_after.png"),
+                    "status_before": str(evdir / "status_before.png"),
+                    "log_before":    str(evdir / "log_before.png"),
+                    "status_after":  str(evdir / "status_after.png"),
+                    "log_after":     str(evdir / "log_after.png"),
                 },
-                "dhcp_event": dhcp_evt
+                "logs": {
+                    "before": prev_log_data,
+                    "after":  log_data,
+                }
             }
             events.append(evt)
             with open(evdir / "event.json", "w", encoding="utf-8") as f:
@@ -183,6 +203,7 @@ try:
             print(f"[!] ОБРЫВ {now:%F %T} – скрины и event сохранены в {evdir}")
 
         prev_uptime = cur_uptime
+        prev_log_data = log_data
         history.append(record)
         if len(history) > 100:
             history = history[-100:]  # Чтобы не раздувать память
