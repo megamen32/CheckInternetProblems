@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import sys, time, json, traceback, datetime, subprocess, signal, shutil
+import sys, time, json, traceback, datetime, subprocess, signal, shutil, argparse, logging
 from pathlib import Path
+from collections import deque
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait as Wait
@@ -22,6 +23,25 @@ OUT_DIR    = Path("router_monitor")
 EVENTS_DIR = OUT_DIR / "events"
 OUT_DIR.mkdir(exist_ok=True)
 EVENTS_DIR.mkdir(exist_ok=True)
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--keep-states",
+    type=int,
+    default=2,
+    help="how many previous states to keep (screenshots/logs)"
+)
+args = parser.parse_args()
+KEEP_STATES = max(1, args.keep_states)
+
+STATUS_FILES = [f"status_{i}.png" for i in range(KEEP_STATES + 1)]
+LOG_FILES = [f"log_{i}.png" for i in range(KEEP_STATES + 1)]
+LOG_FILE = OUT_DIR / "monitor.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()]
+)
 
 # УТИЛИТЫ
 def mk_driver():
@@ -124,11 +144,7 @@ def parse_uptime(text):
 driver = mk_driver()
 login(driver)
 
-last_status_png = "status_last.png"
-last_log_png    = "log_last.png"
-prev_status_png = "status_prev.png"
-prev_log_png    = "log_prev.png"
-prev_log_data   = None
+log_history = deque(maxlen=KEEP_STATES + 1)
 
 prev_uptime = None
 history = []
@@ -143,24 +159,40 @@ try:
     while True:
         now = datetime.datetime.now()
 
-        # Переносим предыдущие скриншоты, чтобы иметь "до" состояния
-        if (OUT_DIR / last_status_png).exists():
-            (OUT_DIR / last_status_png).replace(OUT_DIR / prev_status_png)
-        if (OUT_DIR / last_log_png).exists():
-            (OUT_DIR / last_log_png).replace(OUT_DIR / prev_log_png)
+        # Переносим предыдущие скриншоты, чтобы иметь N прошлых состояний
+        for i in range(KEEP_STATES, 0, -1):
+            src = OUT_DIR / STATUS_FILES[i-1]
+            dst = OUT_DIR / STATUS_FILES[i]
+            if src.exists():
+                src.replace(dst)
+            src = OUT_DIR / LOG_FILES[i-1]
+            dst = OUT_DIR / LOG_FILES[i]
+            if src.exists():
+                src.replace(dst)
+
         # Пинг
         ok_ping, rtt_ping = ping(PING_TARGET)
-        ok_router, _ = ping(PING_ROUTER)
+        ok_router, rtt_router = ping(PING_ROUTER)
+        logging.info(
+            "ping %s: %s%s; router: %s%s",
+            PING_TARGET,
+            "OK " if ok_ping else "FAIL ",
+            f"{rtt_ping:.2f} ms" if rtt_ping is not None else "",
+            "OK " if ok_router else "FAIL ",
+            f"{rtt_router:.2f} ms" if rtt_router is not None else "",
+        )
+
         # Сохраняем свежий статус и скрин status
         status = scrape_status(driver)
-        screenshot(driver, last_status_png)
+        screenshot(driver, STATUS_FILES[0])
         # Сохраняем скрин логов и сам лог
         driver.get(ROUTER_URL_LOG)
         Wait(driver, PAGE_TIMEOUT).until(
             EC.presence_of_element_located((By.ID, "newtablelist"))
         )
-        screenshot(driver, last_log_png)
+        screenshot(driver, LOG_FILES[0])
         log_data = scrape_full_log(driver)
+        log_history.appendleft(log_data)
 
 
 
@@ -169,7 +201,8 @@ try:
             "status": status,
             "ping_ok": ok_ping,
             "ping_rtt": rtt_ping,
-            "router_ping": ok_router
+            "router_ping": ok_router,
+            "router_rtt": rtt_router,
         }
 
         # Проверяем обрыв по uptime
@@ -180,12 +213,12 @@ try:
             evdir.mkdir(exist_ok=True)
 
             # Копируем скрины до и после
-            if (OUT_DIR / prev_status_png).exists():
-                shutil.copy2(OUT_DIR / prev_status_png, evdir / "status_before.png")
-            if (OUT_DIR / prev_log_png).exists():
-                shutil.copy2(OUT_DIR / prev_log_png,    evdir / "log_before.png")
-            shutil.copy2(OUT_DIR / last_status_png, evdir / "status_after.png")
-            shutil.copy2(OUT_DIR / last_log_png,    evdir / "log_after.png")
+            if (OUT_DIR / STATUS_FILES[1]).exists():
+                shutil.copy2(OUT_DIR / STATUS_FILES[1], evdir / "status_before.png")
+            if (OUT_DIR / LOG_FILES[1]).exists():
+                shutil.copy2(OUT_DIR / LOG_FILES[1],    evdir / "log_before.png")
+            shutil.copy2(OUT_DIR / STATUS_FILES[0], evdir / "status_after.png")
+            shutil.copy2(OUT_DIR / LOG_FILES[0],    evdir / "log_after.png")
 
             # Можно (по желанию) также сохранить предыдущий статус в JSON, если хочешь "до"
             if len(history) > 0:
@@ -203,7 +236,7 @@ try:
                     "log_after":     str(evdir / "log_after.png"),
                 },
                 "logs": {
-                    "before": prev_log_data,
+                    "before": log_history[1] if len(log_history) > 1 else None,
                     "after":  log_data,
                 }
             }
@@ -213,7 +246,6 @@ try:
             print(f"[!] ОБРЫВ {now:%F %T} – скрины и event сохранены в {evdir}")
 
         prev_uptime = cur_uptime
-        prev_log_data = log_data
         history.append(record)
         if len(history) > 100:
             history = history[-100:]  # Чтобы не раздувать память
