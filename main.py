@@ -174,10 +174,11 @@ try:
         ok_ping, rtt_ping = ping(PING_TARGET)
         ok_router, rtt_router = ping(PING_ROUTER)
         logging.info(
-            "ping %s: %s%s; router: %s%s",
+            "ping %s: %s%s; %s: %s%s",
             PING_TARGET,
             "OK " if ok_ping else "FAIL ",
             f"{rtt_ping:.2f} ms" if rtt_ping is not None else "",
+            PING_ROUTER,
             "OK " if ok_router else "FAIL ",
             f"{rtt_router:.2f} ms" if rtt_router is not None else "",
         )
