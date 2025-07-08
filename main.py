@@ -213,31 +213,49 @@ try:
             evdir = EVENTS_DIR / idx
             evdir.mkdir(exist_ok=True)
 
-            # Копируем скрины до и после
-            if (OUT_DIR / STATUS_FILES[1]).exists():
-                shutil.copy2(OUT_DIR / STATUS_FILES[1], evdir / "status_before.png")
-            if (OUT_DIR / LOG_FILES[1]).exists():
-                shutil.copy2(OUT_DIR / LOG_FILES[1],    evdir / "log_before.png")
+            # Сохраняем скриншоты до обрыва (до KEEP_STATES штук)
+            before_screens = []
+            for i in range(1, KEEP_STATES + 1):
+                status_src = OUT_DIR / STATUS_FILES[i]
+                log_src = OUT_DIR / LOG_FILES[i]
+                status_dst = log_dst = None
+                if status_src.exists():
+                    status_dst = evdir / f"status_before_{i}.png"
+                    shutil.copy2(status_src, status_dst)
+                if log_src.exists():
+                    log_dst = evdir / f"log_before_{i}.png"
+                    shutil.copy2(log_src, log_dst)
+                if status_dst or log_dst:
+                    before_screens.append({
+                        "status": str(status_dst) if status_dst else None,
+                        "log": str(log_dst) if log_dst else None,
+                    })
+
+            # Скриншоты после обрыва
             shutil.copy2(OUT_DIR / STATUS_FILES[0], evdir / "status_after.png")
             shutil.copy2(OUT_DIR / LOG_FILES[0],    evdir / "log_after.png")
+            after_screen = {
+                "status": str(evdir / "status_after.png"),
+                "log":    str(evdir / "log_after.png"),
+            }
 
-            # Можно (по желанию) также сохранить предыдущий статус в JSON, если хочешь "до"
-            if len(history) > 0:
+            # Сохраняем предыдущие состояния в отдельный JSON (для удобства)
+            if history:
                 with open(evdir / "status_before.json", "w", encoding="utf-8") as f:
-                    json.dump( history[-KEEP_STATES:], f, ensure_ascii=False, indent=2)
+                    json.dump(history[-KEEP_STATES:], f, ensure_ascii=False, indent=2)
+
+            logs_before = list(log_history)[1:KEEP_STATES+1][::-1]
 
             evt = {
                 "drop_detected": now.isoformat(timespec="seconds"),
-                "prev_states": history[-KEEP_STATES:] if history else None,
-                "new_state": record,
+                "prev_records": history[-KEEP_STATES:] if history else None,
+                "new_record": record,
                 "screens": {
-                    "status_before": str(evdir / "status_before.png"),
-                    "log_before":    str(evdir / "log_before.png"),
-                    "status_after":  str(evdir / "status_after.png"),
-                    "log_after":     str(evdir / "log_after.png"),
+                    "before": before_screens,
+                    "after":  after_screen,
                 },
                 "logs": {
-                    "before": log_history[-1] if len(log_history) > 1 else None,
+                    "before": logs_before,
                     "after":  log_data,
                 }
             }
