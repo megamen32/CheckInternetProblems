@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import sys, time, json, traceback, datetime, subprocess, signal, shutil, argparse, logging
+from threading import Thread, Event
 from pathlib import Path
 from collections import deque
 from selenium import webdriver
@@ -18,6 +19,8 @@ CHECK_PERIOD = 60
 PING_TARGET = "77.88.8.8"
 PING_ROUTER = "192.168.2.1"
 PAGE_TIMEOUT = 180  # wait up to 3 minutes for pages/elements
+PING_INTERVAL = 1  # seconds between background pings
+PING_FAIL_LIMIT = 3  # how many failed pings trigger event
 
 OUT_DIR    = Path("router_monitor")
 EVENTS_DIR = OUT_DIR / "events"
@@ -144,14 +147,40 @@ def parse_uptime(text):
 driver = mk_driver()
 login(driver)
 
+# storage for background ping results
+PING_HISTORY_SIZE = 300  # keep a few minutes of history
+ping_router_history = deque(maxlen=PING_HISTORY_SIZE)
+ping_target_history = deque(maxlen=PING_HISTORY_SIZE)
+ping_stop = Event()
+
+
+def ping_worker(host, store):
+    while not ping_stop.is_set():
+        ok, rtt = ping(host)
+        store.append({
+            "time": datetime.datetime.now(),
+            "ok": ok,
+            "rtt": rtt,
+        })
+        time.sleep(PING_INTERVAL)
+
+
+router_thread = Thread(target=ping_worker, args=(PING_ROUTER, ping_router_history), daemon=True)
+target_thread = Thread(target=ping_worker, args=(PING_TARGET, ping_target_history), daemon=True)
+router_thread.start()
+target_thread.start()
+
 log_history = deque(maxlen=KEEP_STATES + 1)
 
 prev_uptime = None
 history = []
 events  = []
+router_fail_seq = 0
+target_fail_seq = 0
 
 def graceful_exit(sig, frame):
     print("\n[!] Останавливаю, генерирую отчёт…")
+    ping_stop.set()
     raise KeyboardInterrupt
 signal.signal(signal.SIGINT, graceful_exit)
 
@@ -170,9 +199,21 @@ try:
             if src.exists():
                 src.replace(dst)
 
-        # Пинг
-        ok_ping, rtt_ping = ping(PING_TARGET)
-        ok_router, rtt_router = ping(PING_ROUTER)
+        # Последние результаты пингов из фоновых потоков
+        last_target = ping_target_history[-1] if ping_target_history else None
+        last_router = ping_router_history[-1] if ping_router_history else None
+        ok_ping = last_target["ok"] if last_target else False
+        rtt_ping = last_target["rtt"] if last_target else None
+        ok_router = last_router["ok"] if last_router else False
+        rtt_router = last_router["rtt"] if last_router else None
+        if ok_router:
+            router_fail_seq = 0
+        else:
+            router_fail_seq += 1
+        if ok_ping:
+            target_fail_seq = 0
+        else:
+            target_fail_seq += 1
         logging.info(
             "ping %s: %s%s; %s: %s%s",
             PING_TARGET,
@@ -201,14 +242,21 @@ try:
             "timestamp": now.isoformat(timespec="seconds"),
             "status": status,
             "ping_yandex": ok_ping,
-            "ping_uandex_ms": rtt_ping,
+            "ping_yandex_ms": rtt_ping,
             "ping_router": ok_router,
             "ping_router_ms": rtt_router,
         }
 
-        # Проверяем обрыв по uptime
+        # Проверяем обрыв по uptime и пингам
         cur_uptime = parse_uptime(status["uptime"])
+        drop_reason = None
         if prev_uptime is not None and cur_uptime < prev_uptime:
+            drop_reason = "uptime_reset"
+        elif router_fail_seq == PING_FAIL_LIMIT:
+            drop_reason = "router_ping"
+        elif target_fail_seq == PING_FAIL_LIMIT:
+            drop_reason = "target_ping"
+        if drop_reason:
             idx = f"{len(events):03d}"
             evdir = EVENTS_DIR / idx
             evdir.mkdir(exist_ok=True)
@@ -246,8 +294,19 @@ try:
 
             logs_before = list(log_history)[1:KEEP_STATES+1][::-1]
 
+            cutoff = now - datetime.timedelta(seconds=120)
+            router_pings = [
+                {"time": p["time"].isoformat(timespec="seconds"), "ok": p["ok"], "rtt": p["rtt"]}
+                for p in ping_router_history if p["time"] >= cutoff
+            ]
+            target_pings = [
+                {"time": p["time"].isoformat(timespec="seconds"), "ok": p["ok"], "rtt": p["rtt"]}
+                for p in ping_target_history if p["time"] >= cutoff
+            ]
+
             evt = {
                 "drop_detected": now.isoformat(timespec="seconds"),
+                "reason": drop_reason,
                 "prev_records": history[-KEEP_STATES:] if history else None,
                 "new_record": record,
                 "screens": {
@@ -257,12 +316,18 @@ try:
                 "logs": {
                     "before": logs_before,
                     "after":  log_data,
+                },
+                "pings": {
+                    "router": router_pings,
+                    "target": target_pings,
                 }
             }
             events.append(evt)
             with open(evdir / "event.json", "w", encoding="utf-8") as f:
                 json.dump(evt, f, ensure_ascii=False, indent=2)
             print(f"[!] ОБРЫВ {now:%F %T} – скрины и event сохранены в {evdir}")
+            router_fail_seq = 0
+            target_fail_seq = 0
 
         prev_uptime = cur_uptime
         history.append(record)
@@ -276,6 +341,9 @@ except KeyboardInterrupt:
 except Exception:
     traceback.print_exc()
 finally:
+    ping_stop.set()
+    router_thread.join(timeout=1)
+    target_thread.join(timeout=1)
     driver.quit()
     report = {
         "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
